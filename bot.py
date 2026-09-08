@@ -40,7 +40,7 @@ async def handle_message(message: types.Message):
             
             if os.path.exists(output_filename):
                 # إرسال الفيديو للمستخدم
-                video_file = FSInputFile(output_filename) if 'FSInputFile' in globals() else types.FSInputFile(output_filename)
+                video_file = types.FSInputFile(output_filename)
                 await message.answer_video(video_file, caption="تم التحميل بنجاح بواسطة البوت!")
                 # حذف الملف من السيرفر لتوفير المساحة
                 os.remove(output_filename)
@@ -67,6 +67,8 @@ async def web_server():
     await site.start()
 
 async def main():
+    # تنظيف أي Webhook قديم أو اتصالات معلقة لمنع أخطاء التعارض
+    await bot.delete_webhook(drop_pending_updates=True)
     await asyncio.gather(
         web_server(),
         dp.start_polling(bot)
