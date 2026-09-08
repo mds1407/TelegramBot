@@ -33,7 +33,8 @@ async def cmd_stats(message: types.Message):
     count = cursor.fetchone()[0]
     await message.answer(f"📊 عدد المستخدمين الكلي للبوت: {count} مستخدم")
 
-@dp.message(F.text.contains("tiktok.com"))
+# جعل البوت يكتشف روابط تيك توك الكاملة أو المختصرة (vt.tiktok.com)
+@dp.message(F.text.regexp(r"(https?://)?(www\.)?(tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com)/\S+"))
 async def download_tiktok(message: types.Message):
     user_id = message.from_user.id
     cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
