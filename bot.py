@@ -6,7 +6,7 @@ from aiogram.filters import Command
 from aiohttp import web
 
 # توكن البوت الخاص بك
-TOKEN = "8701088285:AAHU4fvEdAUZstasTYcsXrMRmtiqdXB0izk"
+TOKEN = "8701088285:AAEajC2J7QVkLyTNdanvE38K_Zoj-vCwNDQ"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
