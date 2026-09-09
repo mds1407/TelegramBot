@@ -7,7 +7,7 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, F
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramBadRequest
 
-TOKEN = "8701088285:AAEAjC2J7QVkLyTNdanvE38K_Zoj-vCwNDQ"
+TOKEN = "8701088285:AAEajC2J7QVkLyTNdanvE38K_Zoj-vCwNDQ"
 CHANNEL_ID = "@MDS2030"
 CHANNEL_LINK = "https://t.me/MDS2030"
 
