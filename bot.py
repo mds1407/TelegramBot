@@ -86,7 +86,7 @@ async def handle_message(message: Message):
             inline_keyboard=[
                 [
                     InlineKeyboardButton(text="فيديو 🎬", callback_data="download_video"),
-                    InlineKeyboardButton(text="صوت MP3 🎵", callback_data="download_audio")
+                    InlineKeyboardButton(text="صوت 🎵", callback_data="download_audio")
                 ]
             ]
         )
@@ -115,16 +115,11 @@ async def process_download(callback_query: types.CallbackQuery):
             'quiet': True,
         }
     else:
-        output_filename = f"audio_{user_id}.mp3"
+        output_filename = f"audio_{user_id}.m4a"
         ydl_opts = {
             'format': 'bestaudio/best',
             'outtmpl': output_filename,
             'quiet': True,
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
         }
 
     try:
