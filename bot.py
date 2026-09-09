@@ -2,6 +2,7 @@ import os
 import asyncio
 import logging
 import sqlite3
+import traceback
 import yt_dlp
 from aiogram import Bot, Dispatcher, BaseMiddleware, types, F
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, CallbackQuery
@@ -40,6 +41,7 @@ def init_db():
     cursor.execute("INSERT OR IGNORE INTO stats (key, value) VALUES ('total_downloads', 0)")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('channel_id', '@MDS2030')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('force_join_enabled', 'true')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notifications_enabled', 'true')")
     conn.commit()
     conn.close()
 
@@ -93,6 +95,25 @@ def get_stats():
 init_db()
 
 # --------------------------------------------------
+# دالة إرسال تنبيه للأدمن عند حدوث خطأ
+# --------------------------------------------------
+async def notify_admin_error(error_msg: str, user_id: int, url: str):
+    notif_enabled = get_setting("notifications_enabled", "true")
+    if notif_enabled != "true":
+        return
+
+    alert_text = (
+        "⚠️ **تنبيه خطأ في البوت!**\n\n"
+        f"👤 **المستخدم:** `{user_id}`\n"
+        f"🔗 **الرابط:** `{url}`\n\n"
+        f"❌ **تفاصيل الخطأ:**\n`{error_msg[:1000]}`"
+    )
+    try:
+        await bot.send_message(chat_id=ADMIN_ID, text=alert_text, parse_mode="Markdown")
+    except Exception as e:
+        logging.error(f"Failed to send alert to admin: {e}")
+
+# --------------------------------------------------
 # حالات FSM للإذاعة وتغيير القناة
 # --------------------------------------------------
 class AdminStates(StatesGroup):
@@ -116,7 +137,6 @@ class ForceJoinMiddleware(BaseMiddleware):
         user_id = event.from_user.id
         add_user(user_id)
 
-        # عدم تطبيق شرط الاشتراك على الأدمن
         if user_id == ADMIN_ID:
             return await handler(event, data)
 
@@ -134,7 +154,7 @@ class ForceJoinMiddleware(BaseMiddleware):
             if member.status in ["creator", "administrator", "member"]:
                 is_subscribed = True
         except Exception:
-            is_subscribed = True  # في حال عدم وجود صلاحيات البوت في القناة يمرر الطلب لعدم العرقلة
+            is_subscribed = True
 
         if not is_subscribed:
             keyboard = InlineKeyboardMarkup(
@@ -186,13 +206,15 @@ async def cmd_admin(message: Message):
         return
 
     current_channel = get_setting("channel_id", "@MDS2030")
-    status = "مفعل 🟢" if get_setting("force_join_enabled", "true") == "true" else "معطل 🔴"
+    status_fj = "مفعل 🟢" if get_setting("force_join_enabled", "true") == "true" else "معطل 🔴"
+    status_notif = "مفعلة 🔔" if get_setting("notifications_enabled", "true") == "true" else "معطلة 🔕"
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📢 إذاعة للكل", callback_data="admin_broadcast")],
             [InlineKeyboardButton(text="📊 الإحصائيات", callback_data="admin_stats")],
-            [InlineKeyboardButton(text=f"⚙️ الاشتراك الإجباري ({status})", callback_data="toggle_force_join")],
+            [InlineKeyboardButton(text=f"⚙️ الاشتراك الإجباري ({status_fj})", callback_data="toggle_force_join")],
+            [InlineKeyboardButton(text=f"🔔 التنبيهات المباشرة ({status_notif})", callback_data="toggle_notifications")],
             [InlineKeyboardButton(text=f"✏️ تغيير القناة ({current_channel})", callback_data="change_channel")]
         ]
     )
@@ -205,8 +227,17 @@ async def toggle_force_join(callback_query: CallbackQuery):
     current = get_setting("force_join_enabled", "true")
     new_val = "false" if current == "true" else "true"
     set_setting("force_join_enabled", new_val)
-    
-    await callback_query.answer("تم تغيير حالة الاشتراك الإجباري بنجاح!")
+    await callback_query.answer("تم تغيير حالة الاشتراك الإجباري!")
+    await cmd_admin(callback_query.message)
+
+@dp.callback_query(F.data == "toggle_notifications")
+async def toggle_notifications(callback_query: CallbackQuery):
+    if callback_query.from_user.id != ADMIN_ID:
+        return
+    current = get_setting("notifications_enabled", "true")
+    new_val = "false" if current == "true" else "true"
+    set_setting("notifications_enabled", new_val)
+    await callback_query.answer("تم تغيير حالة التنبيهات المباشرة!")
     await cmd_admin(callback_query.message)
 
 @dp.callback_query(F.data == "change_channel")
@@ -332,7 +363,7 @@ async def handle_message(message: Message):
         await message.answer("اختر صيغة التحميل التي تريدها:", reply_markup=keyboard)
 
 # --------------------------------------------------
-# معالجة التنزيل (فيديو أو صوت)
+# معالجة التنزيل (فيديو أو صوت) مع إشعار التنبيه
 # --------------------------------------------------
 @dp.callback_query(F.data.in_(["download_video", "download_audio"]))
 async def process_download(callback_query: CallbackQuery):
@@ -381,8 +412,11 @@ async def process_download(callback_query: CallbackQuery):
             await callback_query.message.delete()
         else:
             await callback_query.message.edit_text("حدث خطأ أثناء التنزيل، يرجى التأكد من صحة الرابط.")
+            await notify_admin_error("الملف لم يتكون بعد التنزيل.", user_id, url)
     except Exception as e:
+        error_details = traceback.format_exc()
         await callback_query.message.edit_text("فشل التحميل، يرجى المحاولة لاحقاً.")
+        await notify_admin_error(error_details, user_id, url)
 
 # --------------------------------------------------
 # تشغيل البوت
