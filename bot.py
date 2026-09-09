@@ -1,35 +1,39 @@
 import os
-import asyncio
-import logging
 import sqlite3
-import traceback
-import yt_dlp
-from aiogram import Bot, Dispatcher, BaseMiddleware, types, F
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, CallbackQuery
+import logging
+from datetime import datetime, timedelta
+from typing import Dict
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
+from yt_dlp import YoutubeDL
 
-TOKEN = "8701088285:AAEajC2J7QVkLyTNdanvE38K_Zoj-vCwNDQ"
-ADMIN_ID = 806382074  # ID الأدمن الخاص بك
+# Configuration
+TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+DEFAULT_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@MDS2030")
+RATE_LIMIT_SECONDS = 5  # عدد الثواني المطلوب انتظارها بين طلبات التحميل
 
-# --------------------------------------------------
-# إعداد قاعدة البيانات (SQLite)
-# --------------------------------------------------
+if not TOKEN or ADMIN_ID == 0:
+    raise ValueError("BOT_TOKEN and ADMIN_ID must be set in environment variables.")
+
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+
+# Logging setup
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# Database Setup
+DB_NAME = "bot_data.db"
+
 def init_db():
-    conn = sqlite3.connect("bot_data.db")
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS stats (
-            key TEXT PRIMARY KEY,
-            value INTEGER
+            user_id INTEGER PRIMARY KEY,
+            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     cursor.execute("""
@@ -38,15 +42,40 @@ def init_db():
             value TEXT
         )
     """)
-    cursor.execute("INSERT OR IGNORE INTO stats (key, value) VALUES ('total_downloads', 0)")
-    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('channel_id', '@MDS2030')")
-    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('force_join_enabled', 'true')")
-    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notifications_enabled', 'true')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('force_join', 'enabled')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('required_channel', ?)", (DEFAULT_CHANNEL,))
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('error_notifications', 'enabled')")
     conn.commit()
     conn.close()
 
+init_db()
+
+# DB Helpers
+def add_user(user_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+    conn.commit()
+    conn.close()
+
+def get_total_users() -> int:
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM users")
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+def get_all_users():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM users")
+    users = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return users
+
 def get_setting(key: str, default: str = "") -> str:
-    conn = sqlite3.connect("bot_data.db")
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
     row = cursor.fetchone()
@@ -54,376 +83,253 @@ def get_setting(key: str, default: str = "") -> str:
     return row[0] if row else default
 
 def set_setting(key: str, value: str):
-    conn = sqlite3.connect("bot_data.db")
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
     conn.commit()
     conn.close()
 
-def add_user(user_id: int):
-    conn = sqlite3.connect("bot_data.db")
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
-    conn.commit()
-    conn.close()
+# Anti-Spam / Rate Limit Tracker
+user_last_request: Dict[int, datetime] = {}
 
-def get_all_users():
-    conn = sqlite3.connect("bot_data.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM users")
-    users = [row[0] for row in cursor.fetchall()]
-    conn.close()
-    return users
+def check_rate_limit(user_id: int) -> bool:
+    """ترجع True إذا كان المستخدم متجاوزاً للحد الزمني (يجب منعه)"""
+    now = datetime.now()
+    if user_id in user_last_request:
+        elapsed = (now - user_last_request[user_id]).total_seconds()
+        if elapsed < RATE_LIMIT_SECONDS:
+            return True
+    user_last_request[user_id] = now
+    return False
 
-def increment_downloads():
-    conn = sqlite3.connect("bot_data.db")
-    cursor = conn.cursor()
-    cursor.execute("UPDATE stats SET value = value + 1 WHERE key = 'total_downloads'")
-    conn.commit()
-    conn.close()
+# Admin Helper
+def is_admin(user_id: int) -> bool:
+    return user_id == ADMIN_ID
 
-def get_stats():
-    conn = sqlite3.connect("bot_data.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM users")
-    total_users = cursor.fetchone()[0]
-    cursor.execute("SELECT value FROM stats WHERE key = 'total_downloads'")
-    total_downloads = cursor.fetchone()[0]
-    conn.close()
-    return total_users, total_downloads
-
-init_db()
-
-# --------------------------------------------------
-# دالة إرسال تنبيه للأدمن عند حدوث خطأ
-# --------------------------------------------------
-async def notify_admin_error(error_msg: str, user_id: int, url: str):
-    notif_enabled = get_setting("notifications_enabled", "true")
-    if notif_enabled != "true":
-        return
-
-    alert_text = (
-        "⚠️ **تنبيه خطأ في البوت!**\n\n"
-        f"👤 **المستخدم:** `{user_id}`\n"
-        f"🔗 **الرابط:** `{url}`\n\n"
-        f"❌ **تفاصيل الخطأ:**\n`{error_msg[:1000]}`"
-    )
-    try:
-        await bot.send_message(chat_id=ADMIN_ID, text=alert_text, parse_mode="Markdown")
-    except Exception as e:
-        logging.error(f"Failed to send alert to admin: {e}")
-
-# --------------------------------------------------
-# حالات FSM للإذاعة وتغيير القناة
-# --------------------------------------------------
-class AdminStates(StatesGroup):
-    waiting_for_broadcast = State()
-    confirm_broadcast = State()
-    waiting_for_channel = State()
-
-bot = Bot(token=TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
-
-user_urls = {}
-
-# --------------------------------------------------
-# Middleware لكشف عضوية أو مغادرة القناة
-# --------------------------------------------------
-class ForceJoinMiddleware(BaseMiddleware):
-    async def __call__(self, handler, event, data: dict):
-        if not isinstance(event, (Message, CallbackQuery)):
-            return await handler(event, data)
-
-        user_id = event.from_user.id
-        add_user(user_id)
-
-        if user_id == ADMIN_ID:
-            return await handler(event, data)
-
-        enabled = get_setting("force_join_enabled", "true")
-        if enabled != "true":
-            return await handler(event, data)
-
-        channel_id = get_setting("channel_id", "@MDS2030")
-        clean_channel_username = channel_id.replace("@", "")
-        channel_link = f"https://t.me/{clean_channel_username}"
-
-        is_subscribed = False
+async def notify_admin_error(error_msg: str):
+    if get_setting("error_notifications", "enabled") == "enabled" and ADMIN_ID != 0:
         try:
-            member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
-            if member.status in ["creator", "administrator", "member"]:
-                is_subscribed = True
-        except Exception:
-            is_subscribed = True
+            await bot.send_message(ADMIN_ID, f"⚠️ **تنبيه خطأ في البوت:**\n\n`{error_msg}`", parse_mode="Markdown")
+        except Exception as e:
+            logging.error(f"Failed to send error notification to admin: {e}")
 
-        if not is_subscribed:
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="📢 اشترك في القناة أولاً", url=channel_link)],
-                    [InlineKeyboardButton(text="✅ تحقق من الاشتراك", callback_data="check_subscription")]
-                ]
-            )
-            text = (
-                "⚠️ **لقد قمت بمغادرة القناة أو لم تشترك بعد!**\n\n"
-                "يرجى الاشتراك في القناة لاستخدام البوت والاستمرار في التحميل:"
-            )
-            if isinstance(event, Message):
-                await event.answer(text, reply_markup=keyboard, parse_mode="Markdown")
-            elif isinstance(event, CallbackQuery):
-                await event.answer("⚠️ يجب عليك الاشتراك في القناة أولاً!", show_alert=True)
-                await event.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
-            return
-
-        return await handler(event, data)
-
-dp.message.middleware(ForceJoinMiddleware())
-dp.callback_query.middleware(ForceJoinMiddleware())
-
-# --------------------------------------------------
-# زر التحقق من الاشتراك
-# --------------------------------------------------
-@dp.callback_query(F.data == "check_subscription")
-async def check_subscription_callback(callback_query: CallbackQuery):
-    user_id = callback_query.from_user.id
-    channel_id = get_setting("channel_id", "@MDS2030")
+# Helper: Check Subscription
+async def check_subscription(user_id: int) -> bool:
+    if get_setting("force_join", "enabled") == "disabled":
+        return True
+    
+    channel = get_setting("required_channel", DEFAULT_CHANNEL)
+    if not channel:
+        return True
 
     try:
-        member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
-        if member.status in ["creator", "administrator", "member"]:
-            await callback_query.message.delete()
-            await callback_query.message.answer("✅ تم التأكد من اشتراكك بنجاح! أرسل لي الآن رابط التيك توك لتحميله.")
-        else:
-            await callback_query.answer("❌ لم تشترك في القناة بعد! اشترك ثم اضغط تحقق.", show_alert=True)
-    except Exception:
-        await callback_query.answer("حدث خطأ أثناء التحقق، يرجى المحاولة لاحقاً.", show_alert=True)
+        member = await bot.get_chat_member(chat_id=channel, user_id=user_id)
+        return member.status in ["creator", "administrator", "member"]
+    except Exception as e:
+        logging.error(f"Error checking subscription for {user_id}: {e}")
+        return True  # تجنباً لحظر المستخدم في حال وجود خلل في الصلاحيات
 
-# --------------------------------------------------
-# لوحة تحكم الأدمن (/admin)
-# --------------------------------------------------
-@dp.message(Command("admin"))
-async def cmd_admin(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-
-    current_channel = get_setting("channel_id", "@MDS2030")
-    status_fj = "مفعل 🟢" if get_setting("force_join_enabled", "true") == "true" else "معطل 🔴"
-    status_notif = "مفعلة 🔔" if get_setting("notifications_enabled", "true") == "true" else "معطلة 🔕"
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📢 إذاعة للكل", callback_data="admin_broadcast")],
-            [InlineKeyboardButton(text="📊 الإحصائيات", callback_data="admin_stats")],
-            [InlineKeyboardButton(text=f"⚙️ الاشتراك الإجباري ({status_fj})", callback_data="toggle_force_join")],
-            [InlineKeyboardButton(text=f"🔔 التنبيهات المباشرة ({status_notif})", callback_data="toggle_notifications")],
-            [InlineKeyboardButton(text=f"✏️ تغيير القناة ({current_channel})", callback_data="change_channel")]
-        ]
-    )
-    await message.answer("أهلاً بك في لوحة تحكم الأدمن 👑", reply_markup=keyboard)
-
-@dp.callback_query(F.data == "toggle_force_join")
-async def toggle_force_join(callback_query: CallbackQuery):
-    if callback_query.from_user.id != ADMIN_ID:
-        return
-    current = get_setting("force_join_enabled", "true")
-    new_val = "false" if current == "true" else "true"
-    set_setting("force_join_enabled", new_val)
-    await callback_query.answer("تم تغيير حالة الاشتراك الإجباري!")
-    await cmd_admin(callback_query.message)
-
-@dp.callback_query(F.data == "toggle_notifications")
-async def toggle_notifications(callback_query: CallbackQuery):
-    if callback_query.from_user.id != ADMIN_ID:
-        return
-    current = get_setting("notifications_enabled", "true")
-    new_val = "false" if current == "true" else "true"
-    set_setting("notifications_enabled", new_val)
-    await callback_query.answer("تم تغيير حالة التنبيهات المباشرة!")
-    await cmd_admin(callback_query.message)
-
-@dp.callback_query(F.data == "change_channel")
-async def prompt_change_channel(callback_query: CallbackQuery, state: FSMContext):
-    if callback_query.from_user.id != ADMIN_ID:
-        return
-    await state.set_state(AdminStates.waiting_for_channel)
-    await callback_query.message.answer("أرسل معرف القناة الجديد مع الـ @ (مثال: `@MDS2030`):", parse_mode="Markdown")
-    await callback_query.answer()
-
-@dp.message(AdminStates.waiting_for_channel)
-async def process_new_channel(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID:
-        return
-    new_ch = message.text.strip()
-    if not new_ch.startswith("@"):
-        new_ch = "@" + new_ch
+def get_subscription_keyboard() -> InlineKeyboardMarkup:
+    channel = get_setting("required_channel", DEFAULT_CHANNEL)
+    clean_channel = channel.replace("@", "")
+    url = f"https://t.me/{clean_channel}"
     
-    set_setting("channel_id", new_ch)
-    await state.clear()
-    await message.answer(f"✅ تم تحديث قناة الاشتراك الإجباري إلى: {new_ch}")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 اشترك في القناة هنا", url=url)],
+        [InlineKeyboardButton(text="✅ تحقق من الاشتراك", callback_data="check_sub")]
+    ])
+    return keyboard
+
+# Admin Keyboard Helper
+def get_admin_keyboard() -> InlineKeyboardMarkup:
+    is_fj_enabled = get_setting("force_join", "enabled") == "enabled"
+    fj_status = "مفعل 🟢" if is_fj_enabled else "معطل 🔴"
+    
+    is_err_enabled = get_setting("error_notifications", "enabled") == "enabled"
+    err_status = "مفعلة 🔔" if is_err_enabled else "معطلة 🔕"
+    
+    current_channel = get_setting("required_channel", DEFAULT_CHANNEL)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 إذاعة للكل", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(text="📊 الإحصائيات", callback_data="admin_stats")],
+        [InlineKeyboardButton(text=f"⚙️ الاشتراك الإجباري ({fj_status})", callback_data="toggle_fj")],
+        [InlineKeyboardButton(text=f"🔔 التنبيهات المباشرة ({err_status})", callback_data="toggle_err")],
+        [InlineKeyboardButton(text=f"✏️ تغيير القناة ({current_channel})", callback_data="change_channel")]
+    ])
+    return keyboard
+
+# Command Handlers
+@dp.message(Command("start"))
+async def start_handler(message: Message):
+    user_id = message.from_user.id
+    add_user(user_id)
+    
+    if not await check_subscription(user_id):
+        await message.answer(
+            "⚠️ عذراً عزيزي، يجب عليك الاشتراك في قناة البوت أولاً لاستخدامه:\n\nبعد الاشتراك، اضغط على زر التحقق أسفله 👇",
+            reply_markup=get_subscription_keyboard()
+        )
+        return
+
+    await message.answer(
+        "👋 أهلاً بك في بوت تحميل مقاطع تيك توك بدون علامة مائية!\n\n"
+        "أرسل لي أي رابط من تيك توك وسأقوم بتحميله فوراً 🎬"
+    )
+
+# Admin Panel Command
+@dp.message(Command("admin"))
+async def admin_panel(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    await message.answer(
+        "🛠️ **أهلاً بك في لوحة تحكم الأدمن**",
+        reply_markup=get_admin_keyboard(),
+        parse_mode="Markdown"
+    )
+
+# Admin Callbacks
+@dp.callback_query(F.data == "check_sub")
+async def check_sub_callback(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if await check_subscription(user_id):
+        await callback.message.delete()
+        await callback.message.answer("✅ شكراً لاشتراكك! يمكنك الآن إرسال رابط التيك توك للتحميل.")
+    else:
+        await callback.answer("❌ لم تشترك بعد في القناة! يرجى الاشتراك ثم المحاولة مرة أخرى.", show_alert=True)
 
 @dp.callback_query(F.data == "admin_stats")
-async def process_admin_stats(callback_query: CallbackQuery):
-    if callback_query.from_user.id != ADMIN_ID:
-        return
-    total_users, total_downloads = get_stats()
-    text = (
-        "📊 **إحصائيات البوت:**\n\n"
-        f"👥 **عدد المشتركين الكلي:** {total_users}\n"
-        f"📥 **إجمالي التحميلات:** {total_downloads}"
-    )
-    await callback_query.message.answer(text, parse_mode="Markdown")
-    await callback_query.answer()
-
-@dp.callback_query(F.data == "admin_broadcast")
-async def process_admin_broadcast(callback_query: CallbackQuery, state: FSMContext):
-    if callback_query.from_user.id != ADMIN_ID:
-        return
-    await state.set_state(AdminStates.waiting_for_broadcast)
-    await callback_query.message.answer("أرسل الآن الرسالة التي تريد إرسالها للجميع (نص، صورة، فيديو...):")
-    await callback_query.answer()
-
-@dp.message(AdminStates.waiting_for_broadcast)
-async def receive_broadcast_message(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID:
+async def admin_stats_callback(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
         return
     
-    await state.update_data(broadcast_message_id=message.message_id, chat_id=message.chat.id)
-    await state.set_state(AdminStates.confirm_broadcast)
+    total = get_total_users()
+    await callback.message.answer(f"📊 **إحصائيات البوت:**\n\nإجمالي عدد المشتركين: `{total}` مستخدم", parse_mode="Markdown")
+    await callback.answer()
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ تأكيد الإرسال", callback_data="confirm_send"),
-                InlineKeyboardButton(text="❌ إلغاء", callback_data="cancel_send")
-            ]
-        ]
-    )
-    await message.reply("هل أنت متاكد من إرسال هذه الرسالة لجميع المستخدمين؟", reply_markup=keyboard)
+@dp.callback_query(F.data == "toggle_fj")
+async def toggle_fj_callback(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    
+    current = get_setting("force_join", "enabled")
+    new_status = "disabled" if current == "enabled" else "enabled"
+    set_setting("force_join", new_status)
+    
+    await callback.message.edit_reply_markup(reply_markup=get_admin_keyboard())
+    await callback.answer(f"تم تغيير حالة الاشتراك الإجباري إلى: {new_status}")
 
-@dp.callback_query(F.data == "cancel_send", AdminStates.confirm_broadcast)
-async def cancel_broadcast(callback_query: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback_query.message.edit_text("❌ تم إلغاء الإذاعة.")
-    await callback_query.answer()
+@dp.callback_query(F.data == "toggle_err")
+async def toggle_err_callback(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    
+    current = get_setting("error_notifications", "enabled")
+    new_status = "disabled" if current == "enabled" else "enabled"
+    set_setting("error_notifications", new_status)
+    
+    await callback.message.edit_reply_markup(reply_markup=get_admin_keyboard())
+    await callback.answer(f"تم تغيير حالة تنبيهات الأخطاء إلى: {new_status}")
 
-@dp.callback_query(F.data == "confirm_send", AdminStates.confirm_broadcast)
-async def start_broadcast(callback_query: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    msg_id = data.get("broadcast_message_id")
-    from_chat_id = data.get("chat_id")
-    await state.clear()
+@dp.callback_query(F.data == "change_channel")
+async def change_channel_callback(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    
+    await callback.message.answer("✏️ أرسل معرف القناة الجديد الآن (مثال: `@MyChannel`):")
+    await callback.answer()
 
-    await callback_query.message.edit_text("⏳ جاري بدء الإذاعة...")
+@dp.callback_query(F.data == "admin_broadcast")
+async def broadcast_prompt(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    
+    await callback.message.answer("📢 أرسل الرسالة التي تريد إرسالها لجميع المشتركين الآن (نص، صورة، أو فيديو):")
+    await callback.answer()
+
+# Channel Change Handler
+@dp.message(F.text.startswith("@"))
+async def set_channel_handler(message: Message):
+    if is_admin(message.from_user.id):
+        new_channel = message.text.strip()
+        set_setting("required_channel", new_channel)
+        await message.answer(f"✅ تم تحديث قناة الاشتراك الإجباري بنجاح إلى: {new_channel}")
+
+# Video Downloader Handler
+@dp.message(F.text.contains("tiktok.com"))
+async def handle_tiktok(message: Message):
+    user_id = message.from_user.id
+    add_user(user_id)
+
+    # Check Force Join
+    if not await check_subscription(user_id):
+        await message.answer(
+            "⚠️ عذراً عزيزي، يجب عليك الاشتراك في قناة البوت أولاً لاستخدامه:\n\nبعد الاشتراك، اضغط على زر التحقق أسفله 👇",
+            reply_markup=get_subscription_keyboard()
+        )
+        return
+
+    # Check Rate Limit (Anti-Spam)
+    if check_rate_limit(user_id):
+        await message.answer("⚠️ يرجى الانتظار بضع ثوانٍ قبل إرسال رابط جديد لحماية السيرفر من الضغط.")
+        return
+
+    url = message.text.strip()
+    status_msg = await message.answer("⏳ جاري التحميل، يرجى الانتظار...")
+
+    ydl_opts = {
+        'format': 'bestvideo+bestaudio/best',
+        'outtmpl': 'downloads/%(id)s.%(ext)s',
+        'noplaylist': True,
+        'quiet': True
+    }
+
+    try:
+        os.makedirs("downloads", exist_ok=True)
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            file_path = ydl.prepare_filename(info)
+
+        video_file = types.FSInputFile(file_path)
+        await message.answer_video(video=video_file, caption="✅ تم التحميل بنجاح بواسطة البوت!")
+        await status_msg.delete()
+
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+    except Exception as e:
+        logging.error(f"Download Error: {e}")
+        await status_msg.edit_text("❌ عذراً، تعذر تحميل المقطع. تأكد من أن الرابط صحيح وحساب صاحب المقطع عام وليس خاص.")
+        await notify_admin_error(f"فشل تحميل فيديو للمستخدم `{user_id}`\nالرابط: {url}\nالخطأ: {e}")
+
+# Broadcast Handler (For Admin)
+@dp.message(F.from_user.id == ADMIN_ID)
+async def handle_admin_messages(message: Message):
+    # Ignore commands or TikTok links
+    if message.text and (message.text.startswith("/") or "tiktok.com" in message.text or message.text.startswith("@")):
+        return
 
     users = get_all_users()
     success = 0
     failed = 0
 
-    for u_id in users:
+    status = await message.answer(f"⏳ جاري الإذاعة إلى {len(users)} مستخدم...")
+
+    for uid in users:
         try:
-            await bot.copy_message(chat_id=u_id, from_chat_id=from_chat_id, message_id=msg_id)
+            await message.copy_to(chat_id=uid)
             success += 1
-            await asyncio.sleep(0.05)
-        except (TelegramForbiddenError, TelegramBadRequest):
-            failed += 1
         except Exception:
             failed += 1
 
-    report = (
-        "🚀 **تمت الإذاعة بنجاح!**\n\n"
-        f"✅ **تم الإرسال إلى:** {success}\n"
-        f"❌ **فشل الإرسال إلى:** {failed}"
-    )
-    await callback_query.message.answer(report, parse_mode="Markdown")
-    await callback_query.answer()
+    await status.edit_text(f"✅ اكتملت الإذاعة!\n\n🟢 تم الإرسال بنجاح: {success}\n🔴 فشل الإرسال (حظروا البوت): {failed}")
 
-# --------------------------------------------------
-# أمر البدء /start
-# --------------------------------------------------
-@dp.message(Command("start"))
-async def cmd_start(message: Message):
-    await message.answer("أهلاً بك! أرسل لي رابط فيديو من التيك توك وسأعرض لك خيارات التحميل.")
-
-# --------------------------------------------------
-# استقبال الرابط وعرض أزرار الاختيار (فيديو / صوت)
-# --------------------------------------------------
-@dp.message()
-async def handle_message(message: Message):
-    if message.text and "tiktok.com" in message.text:
-        url = message.text.strip()
-        user_urls[message.from_user.id] = url
-
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="فيديو 🎬", callback_data="download_video"),
-                    InlineKeyboardButton(text="صوت 🎵", callback_data="download_audio")
-                ]
-            ]
-        )
-        await message.answer("اختر صيغة التحميل التي تريدها:", reply_markup=keyboard)
-
-# --------------------------------------------------
-# معالجة التنزيل (فيديو أو صوت) مع إشعار التنبيه
-# --------------------------------------------------
-@dp.callback_query(F.data.in_(["download_video", "download_audio"]))
-async def process_download(callback_query: CallbackQuery):
-    user_id = callback_query.from_user.id
-    url = user_urls.get(user_id)
-
-    if not url:
-        await callback_query.answer("انتهت جلسة التحميل، يرجى إرسال الرابط مرة أخرى.", show_alert=True)
-        return
-
-    download_type = callback_query.data
-    await callback_query.message.edit_text("⏳ جاري التحميل والمعالجة، لطفاً انتظر قليلاً...")
-
-    if download_type == "download_video":
-        output_filename = f"video_{user_id}.mp4"
-        ydl_opts = {
-            'format': 'best',
-            'outtmpl': output_filename,
-            'quiet': True,
-        }
-    else:
-        output_filename = f"audio_{user_id}.m4a"
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': output_filename,
-            'quiet': True,
-        }
-
-    try:
-        loop = asyncio.get_running_loop()
-        def download():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-
-        await loop.run_in_executor(None, download)
-
-        if os.path.exists(output_filename):
-            file_to_send = FSInputFile(output_filename)
-            if download_type == "download_video":
-                await bot.send_video(chat_id=user_id, video=file_to_send, caption="تم تحميل الفيديو بنجاح! 🎬")
-            else:
-                await bot.send_audio(chat_id=user_id, audio=file_to_send, caption="تم استخراج الصوت بنجاح! 🎵")
-            
-            increment_downloads()
-            os.remove(output_filename)
-            await callback_query.message.delete()
-        else:
-            await callback_query.message.edit_text("حدث خطأ أثناء التنزيل، يرجى التأكد من صحة الرابط.")
-            await notify_admin_error("الملف لم يتكون بعد التنزيل.", user_id, url)
-    except Exception as e:
-        error_details = traceback.format_exc()
-        await callback_query.message.edit_text("فشل التحميل، يرجى المحاولة لاحقاً.")
-        await notify_admin_error(error_details, user_id, url)
-
-# --------------------------------------------------
-# تشغيل البوت
-# --------------------------------------------------
-async def main():
-    logging.basicConfig(level=logging.INFO)
-    await dp.start_polling(bot)
-
+# Main
 if __name__ == "__main__":
+    import asyncio
+    async def main():
+        logging.info("Starting Bot...")
+        await dp.start_polling(bot)
+
     asyncio.run(main())
