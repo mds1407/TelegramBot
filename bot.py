@@ -13,8 +13,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 TOKEN = "8701088285:AAEajC2J7QVkLyTNdanvE38K_Zoj-vCwNDQ"
 ADMIN_ID = 806382074  # ID الأدمن الخاص بك
-CHANNEL_ID = "@MDS2030"
-CHANNEL_LINK = "https://t.me/MDS2030"
 
 # --------------------------------------------------
 # إعداد قاعدة البيانات (SQLite)
@@ -33,7 +31,30 @@ def init_db():
             value INTEGER
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
     cursor.execute("INSERT OR IGNORE INTO stats (key, value) VALUES ('total_downloads', 0)")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('channel_id', '@MDS2030')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('force_join_enabled', 'true')")
+    conn.commit()
+    conn.close()
+
+def get_setting(key: str, default: str = "") -> str:
+    conn = sqlite3.connect("bot_data.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else default
+
+def set_setting(key: str, value: str):
+    conn = sqlite3.connect("bot_data.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
     conn.commit()
     conn.close()
 
@@ -72,11 +93,12 @@ def get_stats():
 init_db()
 
 # --------------------------------------------------
-# حالات FSM للإذاعة
+# حالات FSM للإذاعة وتغيير القناة
 # --------------------------------------------------
-class BroadcastStates(StatesGroup):
-    waiting_for_message = State()
+class AdminStates(StatesGroup):
+    waiting_for_broadcast = State()
     confirm_broadcast = State()
+    waiting_for_channel = State()
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -84,38 +106,58 @@ dp = Dispatcher(storage=MemoryStorage())
 user_urls = {}
 
 # --------------------------------------------------
-# Middleware للتحقق من الاشتراك الإجباري وحفظ المستخدم
+# Middleware لكشف عضوية أو مغادرة القناة
 # --------------------------------------------------
 class ForceJoinMiddleware(BaseMiddleware):
-    async def __call__(self, handler, event: Message, data: dict):
-        if not isinstance(event, Message):
+    async def __call__(self, handler, event, data: dict):
+        if not isinstance(event, (Message, CallbackQuery)):
             return await handler(event, data)
 
         user_id = event.from_user.id
-        add_user(user_id)  # تسجيل المستخدم في قاعدة البيانات تلقائياً
+        add_user(user_id)
 
+        # عدم تطبيق شرط الاشتراك على الأدمن
+        if user_id == ADMIN_ID:
+            return await handler(event, data)
+
+        enabled = get_setting("force_join_enabled", "true")
+        if enabled != "true":
+            return await handler(event, data)
+
+        channel_id = get_setting("channel_id", "@MDS2030")
+        clean_channel_username = channel_id.replace("@", "")
+        channel_link = f"https://t.me/{clean_channel_username}"
+
+        is_subscribed = False
         try:
-            member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+            member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
             if member.status in ["creator", "administrator", "member"]:
-                return await handler(event, data)
-        except TelegramBadRequest:
-            pass
+                is_subscribed = True
+        except Exception:
+            is_subscribed = True  # في حال عدم وجود صلاحيات البوت في القناة يمرر الطلب لعدم العرقلة
 
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📢 اشترك في القناة أولاً", url=CHANNEL_LINK)],
-                [InlineKeyboardButton(text="✅ تحقق من الاشتراك", callback_data="check_subscription")]
-            ]
-        )
-        await event.answer(
-            "⚠️ **عذراً، يجب عليك الاشتراك في القناة أولاً لاستخدام البوت.**\n\n"
-            "اضغط على الزر أدناه للاشتراك، ثم اضغط على (تحقق من الاشتراك):",
-            reply_markup=keyboard,
-            parse_mode="Markdown"
-        )
-        return
+        if not is_subscribed:
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="📢 اشترك في القناة أولاً", url=channel_link)],
+                    [InlineKeyboardButton(text="✅ تحقق من الاشتراك", callback_data="check_subscription")]
+                ]
+            )
+            text = (
+                "⚠️ **لقد قمت بمغادرة القناة أو لم تشترك بعد!**\n\n"
+                "يرجى الاشتراك في القناة لاستخدام البوت والاستمرار في التحميل:"
+            )
+            if isinstance(event, Message):
+                await event.answer(text, reply_markup=keyboard, parse_mode="Markdown")
+            elif isinstance(event, CallbackQuery):
+                await event.answer("⚠️ يجب عليك الاشتراك في القناة أولاً!", show_alert=True)
+                await event.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
+            return
+
+        return await handler(event, data)
 
 dp.message.middleware(ForceJoinMiddleware())
+dp.callback_query.middleware(ForceJoinMiddleware())
 
 # --------------------------------------------------
 # زر التحقق من الاشتراك
@@ -123,8 +165,10 @@ dp.message.middleware(ForceJoinMiddleware())
 @dp.callback_query(F.data == "check_subscription")
 async def check_subscription_callback(callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
+    channel_id = get_setting("channel_id", "@MDS2030")
+
     try:
-        member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+        member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
         if member.status in ["creator", "administrator", "member"]:
             await callback_query.message.delete()
             await callback_query.message.answer("✅ تم التأكد من اشتراكك بنجاح! أرسل لي الآن رابط التيك توك لتحميله.")
@@ -141,13 +185,49 @@ async def cmd_admin(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
 
+    current_channel = get_setting("channel_id", "@MDS2030")
+    status = "مفعل 🟢" if get_setting("force_join_enabled", "true") == "true" else "معطل 🔴"
+
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📢 إذاعة للكل", callback_data="admin_broadcast")],
-            [InlineKeyboardButton(text="📊 الإحصائيات", callback_data="admin_stats")]
+            [InlineKeyboardButton(text="📊 الإحصائيات", callback_data="admin_stats")],
+            [InlineKeyboardButton(text=f"⚙️ الاشتراك الإجباري ({status})", callback_data="toggle_force_join")],
+            [InlineKeyboardButton(text=f"✏️ تغيير القناة ({current_channel})", callback_data="change_channel")]
         ]
     )
     await message.answer("أهلاً بك في لوحة تحكم الأدمن 👑", reply_markup=keyboard)
+
+@dp.callback_query(F.data == "toggle_force_join")
+async def toggle_force_join(callback_query: CallbackQuery):
+    if callback_query.from_user.id != ADMIN_ID:
+        return
+    current = get_setting("force_join_enabled", "true")
+    new_val = "false" if current == "true" else "true"
+    set_setting("force_join_enabled", new_val)
+    
+    await callback_query.answer("تم تغيير حالة الاشتراك الإجباري بنجاح!")
+    await cmd_admin(callback_query.message)
+
+@dp.callback_query(F.data == "change_channel")
+async def prompt_change_channel(callback_query: CallbackQuery, state: FSMContext):
+    if callback_query.from_user.id != ADMIN_ID:
+        return
+    await state.set_state(AdminStates.waiting_for_channel)
+    await callback_query.message.answer("أرسل معرف القناة الجديد مع الـ @ (مثال: `@MDS2030`):", parse_mode="Markdown")
+    await callback_query.answer()
+
+@dp.message(AdminStates.waiting_for_channel)
+async def process_new_channel(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    new_ch = message.text.strip()
+    if not new_ch.startswith("@"):
+        new_ch = "@" + new_ch
+    
+    set_setting("channel_id", new_ch)
+    await state.clear()
+    await message.answer(f"✅ تم تحديث قناة الاشتراك الإجباري إلى: {new_ch}")
 
 @dp.callback_query(F.data == "admin_stats")
 async def process_admin_stats(callback_query: CallbackQuery):
@@ -166,17 +246,17 @@ async def process_admin_stats(callback_query: CallbackQuery):
 async def process_admin_broadcast(callback_query: CallbackQuery, state: FSMContext):
     if callback_query.from_user.id != ADMIN_ID:
         return
-    await state.set_state(BroadcastStates.waiting_for_message)
+    await state.set_state(AdminStates.waiting_for_broadcast)
     await callback_query.message.answer("أرسل الآن الرسالة التي تريد إرسالها للجميع (نص، صورة، فيديو...):")
     await callback_query.answer()
 
-@dp.message(BroadcastStates.waiting_for_message)
+@dp.message(AdminStates.waiting_for_broadcast)
 async def receive_broadcast_message(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
     
     await state.update_data(broadcast_message_id=message.message_id, chat_id=message.chat.id)
-    await state.set_state(BroadcastStates.confirm_broadcast)
+    await state.set_state(AdminStates.confirm_broadcast)
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -188,13 +268,13 @@ async def receive_broadcast_message(message: Message, state: FSMContext):
     )
     await message.reply("هل أنت متاكد من إرسال هذه الرسالة لجميع المستخدمين؟", reply_markup=keyboard)
 
-@dp.callback_query(F.data == "cancel_send", BroadcastStates.confirm_broadcast)
+@dp.callback_query(F.data == "cancel_send", AdminStates.confirm_broadcast)
 async def cancel_broadcast(callback_query: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback_query.message.edit_text("❌ تم إلغاء الإذاعة.")
     await callback_query.answer()
 
-@dp.callback_query(F.data == "confirm_send", BroadcastStates.confirm_broadcast)
+@dp.callback_query(F.data == "confirm_send", AdminStates.confirm_broadcast)
 async def start_broadcast(callback_query: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     msg_id = data.get("broadcast_message_id")
@@ -211,7 +291,7 @@ async def start_broadcast(callback_query: CallbackQuery, state: FSMContext):
         try:
             await bot.copy_message(chat_id=u_id, from_chat_id=from_chat_id, message_id=msg_id)
             success += 1
-            await asyncio.sleep(0.05)  # لتفادي حظر تليجرام للإرسال السريع
+            await asyncio.sleep(0.05)
         except (TelegramForbiddenError, TelegramBadRequest):
             failed += 1
         except Exception:
@@ -296,7 +376,7 @@ async def process_download(callback_query: CallbackQuery):
             else:
                 await bot.send_audio(chat_id=user_id, audio=file_to_send, caption="تم استخراج الصوت بنجاح! 🎵")
             
-            increment_downloads()  # زيادة عداد التحميلات
+            increment_downloads()
             os.remove(output_filename)
             await callback_query.message.delete()
         else:
