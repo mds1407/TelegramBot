@@ -6,6 +6,7 @@ import traceback
 from datetime import datetime
 from typing import Dict
 import yt_dlp
+from aiohttp import web
 
 from aiogram import Bot, Dispatcher, BaseMiddleware, types, F
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, CallbackQuery
@@ -16,8 +17,25 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 TOKEN = "8701088285:AAEajC2J7QVkLyTNdanvE38K_Zoj-vCwNDQ"
-ADMIN_ID = 806382074  # ID الأدمن الخاص بكِ
-RATE_LIMIT_SECONDS = 5  # زمن المهلة بالثواني لمنع السبام
+ADMIN_ID = 806382074
+RATE_LIMIT_SECONDS = 5
+
+# --------------------------------------------------
+# خادم ويب وهمي لارضاء Render
+# --------------------------------------------------
+async def handle_ping(request):
+    return web.Response(text="Bot is running live!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle_ping)
+    app.router.add_get('/health', handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logging.info(f"Web server started on port {port}")
 
 # --------------------------------------------------
 # إعداد قاعدة البيانات (SQLite)
@@ -99,7 +117,7 @@ def get_stats():
 init_db()
 
 # --------------------------------------------------
-# نظام منع السبام والضغط (Rate Limiting)
+# نظام منع السبام والضغط
 # --------------------------------------------------
 user_last_request: Dict[int, datetime] = {}
 
@@ -147,7 +165,7 @@ dp = Dispatcher(storage=MemoryStorage())
 user_urls = {}
 
 # --------------------------------------------------
-# Middleware لكشف عضوية أو مغادرة القناة
+# Middleware لكشف عضوية القناة
 # --------------------------------------------------
 class ForceJoinMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data: dict):
@@ -157,7 +175,6 @@ class ForceJoinMiddleware(BaseMiddleware):
         user_id = event.from_user.id
         add_user(user_id)
 
-        # تجاوز استثناء الاشتراك للأدمن كلياً
         if user_id == ADMIN_ID:
             return await handler(event, data)
 
@@ -365,14 +382,13 @@ async def cmd_start(message: Message):
     await message.answer("أهلاً بك! أرسل لي رابط فيديو من التيك توك وسأعرض لك خيارات التحميل.")
 
 # --------------------------------------------------
-# استقبال الرابط وعرض أزرار الاختيار (فيديو / صوت)
+# استقبال الرابط
 # --------------------------------------------------
 @dp.message()
 async def handle_message(message: Message):
     if message.text and "tiktok.com" in message.text:
         user_id = message.from_user.id
         
-        # حماية السيرفر من الضغط والسبام
         if is_rate_limited(user_id):
             await message.answer(f"⚠️ **لطفاً انتظر {RATE_LIMIT_SECONDS} ثوانٍ بين كل طلب والآخر لحماية السيرفر من الضغط.**")
             return
@@ -391,7 +407,7 @@ async def handle_message(message: Message):
         await message.answer("اختر صيغة التحميل التي تريدها:", reply_markup=keyboard)
 
 # --------------------------------------------------
-# معالجة التنزيل (فيديو أو صوت) مع إشعار التنبيه
+# معالجة التنزيل
 # --------------------------------------------------
 @dp.callback_query(F.data.in_(["download_video", "download_audio"]))
 async def process_download(callback_query: CallbackQuery):
@@ -447,10 +463,18 @@ async def process_download(callback_query: CallbackQuery):
         await notify_admin_error(error_details, user_id, url)
 
 # --------------------------------------------------
-# تشغيل البوت
+# التشغيل
 # --------------------------------------------------
 async def main():
     logging.basicConfig(level=logging.INFO)
+    
+    # حذف أي Webhook قديم لتفادي التعارض تماماً
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    # تشغيل خادم الويب الوهمي مع البوت بنفس الوقت
+    await start_web_server()
+    
+    # بدء استلام التحديثات
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
