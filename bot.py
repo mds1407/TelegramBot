@@ -16,15 +16,16 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-TOKEN = "8701088285:AAEajC2J7QVkLyTNdanvE38K_Zoj-vCwNDQ"
-ADMIN_ID = 806382074
+# جلب التوكن والآيدي بأمان من متغيرات البيئة
+TOKEN = os.getenv("BOT_TOKEN", "8701088285:AAEajC2J7QVkLyTNdanvE38K_Zoj-vCwNDQ")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "806382074"))
 RATE_LIMIT_SECONDS = 5
 
 # --------------------------------------------------
-# خادم ويب وهمي لارضاء Render
+# خادم ويب وهمي لضمان استقرار الخدمة في Render
 # --------------------------------------------------
 async def handle_ping(request):
-    return web.Response(text="Bot is running live!")
+    return web.Response(text="Bot is running smoothly!")
 
 async def start_web_server():
     app = web.Application()
@@ -117,7 +118,7 @@ def get_stats():
 init_db()
 
 # --------------------------------------------------
-# نظام منع السبام والضغط
+# نظام حماية السيرفر (Anti-Spam & Rate Limit)
 # --------------------------------------------------
 user_last_request: Dict[int, datetime] = {}
 
@@ -133,7 +134,7 @@ def is_rate_limited(user_id: int) -> bool:
     return False
 
 # --------------------------------------------------
-# دالة إرسال تنبيه للأدمن عند حدوث خطأ
+# إرسال تنبيهات الأخطاء للأدمن
 # --------------------------------------------------
 async def notify_admin_error(error_msg: str, user_id: int, url: str):
     notif_enabled = get_setting("notifications_enabled", "true")
@@ -152,7 +153,7 @@ async def notify_admin_error(error_msg: str, user_id: int, url: str):
         logging.error(f"Failed to send alert to admin: {e}")
 
 # --------------------------------------------------
-# حالات FSM للإذاعة وتغيير القناة
+# حالات FSM للأدمن
 # --------------------------------------------------
 class AdminStates(StatesGroup):
     waiting_for_broadcast = State()
@@ -165,7 +166,7 @@ dp = Dispatcher(storage=MemoryStorage())
 user_urls = {}
 
 # --------------------------------------------------
-# Middleware لكشف عضوية القناة
+# Middleware للاشتراك الإجباري والتأكد من استثناء الأدمن
 # --------------------------------------------------
 class ForceJoinMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data: dict):
@@ -175,6 +176,7 @@ class ForceJoinMiddleware(BaseMiddleware):
         user_id = event.from_user.id
         add_user(user_id)
 
+        # استثناء الأدمن تماماً من شرط الاشتراك
         if user_id == ADMIN_ID:
             return await handler(event, data)
 
@@ -202,8 +204,7 @@ class ForceJoinMiddleware(BaseMiddleware):
                 ]
             )
             text = (
-                "⚠️ **لقد قمت بمغادرة القناة أو لم تشترك بعد!**\n\n"
-                "يرجى الاشتراك في القناة لاستخدام البوت والاستمرار في التحميل:"
+                "⚠️ **يرجى الاشتراك في القناة أولاً لاستخدام البوت:**"
             )
             if isinstance(event, Message):
                 await event.answer(text, reply_markup=keyboard, parse_mode="Markdown")
@@ -463,18 +464,18 @@ async def process_download(callback_query: CallbackQuery):
         await notify_admin_error(error_details, user_id, url)
 
 # --------------------------------------------------
-# التشغيل
+# التشغيل الرئيسي
 # --------------------------------------------------
 async def main():
     logging.basicConfig(level=logging.INFO)
     
-    # حذف أي Webhook قديم لتفادي التعارض تماماً
+    # إلغاء أي Webhook قديم لتفادي التعارض نهائياً
     await bot.delete_webhook(drop_pending_updates=True)
     
-    # تشغيل خادم الويب الوهمي مع البوت بنفس الوقت
+    # تشغيل خادم الويب الوهمي
     await start_web_server()
     
-    # بدء استلام التحديثات
+    # بدء التنسيق والاستجابة
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
