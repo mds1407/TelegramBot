@@ -62,8 +62,6 @@ def init_db():
         )
     """)
     cursor.execute("INSERT OR IGNORE INTO stats (key, value) VALUES ('total_downloads', 0)")
-    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('channel_id', '@MDS2030')")
-    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('force_join_enabled', 'false')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notifications_enabled', 'true')")
     conn.commit()
     conn.close()
@@ -158,7 +156,6 @@ async def notify_admin_error(error_msg: str, user_id: int, url: str):
 class AdminStates(StatesGroup):
     waiting_for_broadcast = State()
     confirm_broadcast = State()
-    waiting_for_channel = State()
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -185,30 +182,16 @@ async def cmd_admin(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
 
-    current_channel = get_setting("channel_id", "@MDS2030")
-    status_fj = "مفعل 🟢" if get_setting("force_join_enabled", "false") == "true" else "معطل 🔴"
     status_notif = "مفعلة 🔔" if get_setting("notifications_enabled", "true") == "true" else "معطلة 🔕"
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📢 إذاعة للكل", callback_data="admin_broadcast")],
             [InlineKeyboardButton(text="📊 الإحصائيات", callback_data="admin_stats")],
-            [InlineKeyboardButton(text=f"⚙️ الاشتراك الإجباري ({status_fj})", callback_data="toggle_force_join")],
-            [InlineKeyboardButton(text=f"🔔 التنبيهات المباشرة ({status_notif})", callback_data="toggle_notifications")],
-            [InlineKeyboardButton(text=f"✏️ تغيير القناة ({current_channel})", callback_data="change_channel")]
+            [InlineKeyboardButton(text=f"🔔 التنبيهات المباشرة ({status_notif})", callback_data="toggle_notifications")]
         ]
     )
     await message.answer("أهلاً بك في لوحة تحكم الأدمن 👑", reply_markup=keyboard)
-
-@dp.callback_query(F.data == "toggle_force_join")
-async def toggle_force_join(callback_query: CallbackQuery):
-    if callback_query.from_user.id != ADMIN_ID:
-        return
-    current = get_setting("force_join_enabled", "false")
-    new_val = "false" if current == "true" else "true"
-    set_setting("force_join_enabled", new_val)
-    await callback_query.answer("تم تغيير حالة الاشتراك الإجباري!")
-    await cmd_admin(callback_query.message)
 
 @dp.callback_query(F.data == "toggle_notifications")
 async def toggle_notifications(callback_query: CallbackQuery):
@@ -219,26 +202,6 @@ async def toggle_notifications(callback_query: CallbackQuery):
     set_setting("notifications_enabled", new_val)
     await callback_query.answer("تم تغيير حالة التنبيهات المباشرة!")
     await cmd_admin(callback_query.message)
-
-@dp.callback_query(F.data == "change_channel")
-async def prompt_change_channel(callback_query: CallbackQuery, state: FSMContext):
-    if callback_query.from_user.id != ADMIN_ID:
-        return
-    await state.set_state(AdminStates.waiting_for_channel)
-    await callback_query.message.answer("أرسل معرف القناة الجديد مع الـ @ (مثال: `@MDS2030`):", parse_mode="Markdown")
-    await callback_query.answer()
-
-@dp.message(AdminStates.waiting_for_channel)
-async def process_new_channel(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID:
-        return
-    new_ch = message.text.strip()
-    if not new_ch.startswith("@"):
-        new_ch = "@" + new_ch
-    
-    set_setting("channel_id", new_ch)
-    await state.clear()
-    await message.answer(f"✅ تم تحديث معرف القناة إلى: {new_ch}")
 
 @dp.callback_query(F.data == "admin_stats")
 async def process_admin_stats(callback_query: CallbackQuery):
