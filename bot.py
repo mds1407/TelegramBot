@@ -63,7 +63,7 @@ def init_db():
     """)
     cursor.execute("INSERT OR IGNORE INTO stats (key, value) VALUES ('total_downloads', 0)")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('channel_id', '@MDS2030')")
-    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('force_join_enabled', 'false')")  # معطل افتراضياً بناءً على طلبك
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('force_join_enabled', 'false')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notifications_enabled', 'true')")
     conn.commit()
     conn.close()
@@ -166,7 +166,7 @@ dp = Dispatcher(storage=MemoryStorage())
 user_urls = {}
 
 # --------------------------------------------------
-# Middleware لتسجيل المستخدمين فقط (بدون أي اشتراك إجباري)
+# Middleware لتسجيل المستخدمين فقط
 # --------------------------------------------------
 class UserTrackingMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data: dict):
@@ -321,7 +321,7 @@ async def start_broadcast(callback_query: CallbackQuery, state: FSMContext):
 # --------------------------------------------------
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    await message.answer("أهلاً بك! أرسل لي رابط فيديو من التيك توك وسأعرض لك خيارات التحميل.")
+    await message.answer("أهلاً بك! أرسل لي رابط فيديو من التيك توك (حتى المقاطع الطويلة) وسأعرض لك خيارات التحميل.")
 
 # --------------------------------------------------
 # استقبال الرابط
@@ -349,7 +349,7 @@ async def handle_message(message: Message):
         await message.answer("اختر صيغة التحميل التي تريدها:", reply_markup=keyboard)
 
 # --------------------------------------------------
-# معالجة التنزيل
+# معالجة التنزيل (مدعوم للمقاطع الطويلة)
 # --------------------------------------------------
 @dp.callback_query(F.data.in_(["download_video", "download_audio"]))
 async def process_download(callback_query: CallbackQuery):
@@ -361,14 +361,16 @@ async def process_download(callback_query: CallbackQuery):
         return
 
     download_type = callback_query.data
-    await callback_query.message.edit_text("⏳ جاري التحميل والمعالجة، لطفاً انتظر قليلاً...")
+    await callback_query.message.edit_text("⏳ جاري تحميل ومعالجة المقطع (قد يستغرق وقتاً أطول للمقاطع الطويلة)...")
 
     if download_type == "download_video":
         output_filename = f"video_{user_id}.mp4"
         ydl_opts = {
-            'format': 'best',
+            # اختيار أفضل جودة بحدود مقبولة لضمان تحميل المقاطع الطويلة بسلاسة
+            'format': 'best[height<=720]/best',
             'outtmpl': output_filename,
             'quiet': True,
+            'socket_timeout': 30,
         }
     else:
         output_filename = f"audio_{user_id}.m4a"
@@ -376,6 +378,7 @@ async def process_download(callback_query: CallbackQuery):
             'format': 'bestaudio/best',
             'outtmpl': output_filename,
             'quiet': True,
+            'socket_timeout': 30,
         }
 
     try:
@@ -389,7 +392,7 @@ async def process_download(callback_query: CallbackQuery):
         if os.path.exists(output_filename):
             file_to_send = FSInputFile(output_filename)
             if download_type == "download_video":
-                await bot.send_video(chat_id=user_id, video=file_to_send, caption="تم تحميل الفيديو بنجاح! 🎬")
+                await bot.send_video(chat_id=user_id, video=file_to_send, caption="تم تحميل المقطع الطويل بنجاح! 🎬")
             else:
                 await bot.send_audio(chat_id=user_id, audio=file_to_send, caption="تم استخراج الصوت بنجاح! 🎵")
             
@@ -398,10 +401,10 @@ async def process_download(callback_query: CallbackQuery):
             await callback_query.message.delete()
         else:
             await callback_query.message.edit_text("حدث خطأ أثناء التنزيل، يرجى التأكد من صحة الرابط.")
-            await notify_admin_error("الملف لم يتكون بعد التنزيل.", user_id, url)
+            await notify_admin_error("الملف لم يتكون بعد التنزيل للمقطع الطويل.", user_id, url)
     except Exception as e:
         error_details = traceback.format_exc()
-        await callback_query.message.edit_text("فشل التحميل، يرجى المحاولة لاحقاً.")
+        await callback_query.message.edit_text("فشل التحميل، قد يكون المقطع طويلاً جداً أو تجاوز الحد المسموح.")
         await notify_admin_error(error_details, user_id, url)
 
 # --------------------------------------------------
