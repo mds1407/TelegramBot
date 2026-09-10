@@ -366,7 +366,6 @@ async def process_download(callback_query: CallbackQuery):
     if download_type == "download_video":
         output_filename = f"video_{user_id}.mp4"
         ydl_opts = {
-            # اختيار أفضل جودة بحدود مقبولة لضمان تحميل المقاطع الطويلة بسلاسة
             'format': 'best[height<=720]/best',
             'outtmpl': output_filename,
             'quiet': True,
@@ -413,13 +412,8 @@ async def process_download(callback_query: CallbackQuery):
 async def main():
     logging.basicConfig(level=logging.INFO)
     
-    # إلغاء أي Webhook قديم لتفادي التعارض نهائياً
     await bot.delete_webhook(drop_pending_updates=True)
-    
-    # تشغيل خادم الويب الوهمي
     await start_web_server()
-    
-    # بدء التنسيق والاستجابة
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
