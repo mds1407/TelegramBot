@@ -63,7 +63,7 @@ def init_db():
     """)
     cursor.execute("INSERT OR IGNORE INTO stats (key, value) VALUES ('total_downloads', 0)")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('channel_id', '@MDS2030')")
-    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('force_join_enabled', 'true')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('force_join_enabled', 'false')")  # معطل افتراضياً بناءً على طلبك
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notifications_enabled', 'true')")
     conn.commit()
     conn.close()
@@ -166,75 +166,16 @@ dp = Dispatcher(storage=MemoryStorage())
 user_urls = {}
 
 # --------------------------------------------------
-# Middleware للاشتراك الإجباري والتأكد من استثناء الأدمن
+# Middleware لتسجيل المستخدمين فقط (بدون أي اشتراك إجباري)
 # --------------------------------------------------
-class ForceJoinMiddleware(BaseMiddleware):
+class UserTrackingMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data: dict):
-        if not isinstance(event, (Message, CallbackQuery)):
-            return await handler(event, data)
-
-        user_id = event.from_user.id
-        add_user(user_id)
-
-        # استثناء الأدمن تماماً من شرط الاشتراك
-        if user_id == ADMIN_ID:
-            return await handler(event, data)
-
-        enabled = get_setting("force_join_enabled", "true")
-        if enabled != "true":
-            return await handler(event, data)
-
-        channel_id = get_setting("channel_id", "@MDS2030")
-        clean_channel_username = channel_id.replace("@", "")
-        channel_link = f"https://t.me/{clean_channel_username}"
-
-        is_subscribed = False
-        try:
-            member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
-            if member.status in ["creator", "administrator", "member"]:
-                is_subscribed = True
-        except Exception:
-            is_subscribed = True
-
-        if not is_subscribed:
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="📢 اشترك في القناة أولاً", url=channel_link)],
-                    [InlineKeyboardButton(text="✅ تحقق من الاشتراك", callback_data="check_subscription")]
-                ]
-            )
-            text = (
-                "⚠️ **يرجى الاشتراك في القناة أولاً لاستخدام البوت:**"
-            )
-            if isinstance(event, Message):
-                await event.answer(text, reply_markup=keyboard, parse_mode="Markdown")
-            elif isinstance(event, CallbackQuery):
-                await event.answer("⚠️ يجب عليك الاشتراك في القناة أولاً!", show_alert=True)
-                await event.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
-            return
-
+        if isinstance(event, (Message, CallbackQuery)) and event.from_user:
+            add_user(event.from_user.id)
         return await handler(event, data)
 
-dp.message.middleware(ForceJoinMiddleware())
-dp.callback_query.middleware(ForceJoinMiddleware())
-
-# --------------------------------------------------
-# زر التحقق من الاشتراك
-# --------------------------------------------------
-@dp.callback_query(F.data == "check_subscription")
-async def check_subscription_callback(callback_query: CallbackQuery):
-    user_id = callback_query.from_user.id
-    channel_id = get_setting("channel_id", "@MDS2030")
-
-    try:
-        member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
-        if member.status in ["creator", "administrator", "member"]:
-            await callback_query.message.delete()
-            await callback_query.message.answer("✅ تم التأكد من اشتراكك بنجاح! أرسل لي الآن رابط التيك توك لتحميله.")
-        else:
-            await callback_query.answer("❌ لم تشترك في القناة بعد! اشترك ثم اضغط تحقق.", show_alert=True)
-    except Exception:
-        await callback_query.answer("حدث خطأ أثناء التحقق، يرجى المحاولة لاحقاً.", show_alert=True)
+dp.message.middleware(UserTrackingMiddleware())
+dp.callback_query.middleware(UserTrackingMiddleware())
 
 # --------------------------------------------------
 # لوحة تحكم الأدمن (/admin)
@@ -245,7 +186,7 @@ async def cmd_admin(message: Message):
         return
 
     current_channel = get_setting("channel_id", "@MDS2030")
-    status_fj = "مفعل 🟢" if get_setting("force_join_enabled", "true") == "true" else "معطل 🔴"
+    status_fj = "مفعل 🟢" if get_setting("force_join_enabled", "false") == "true" else "معطل 🔴"
     status_notif = "مفعلة 🔔" if get_setting("notifications_enabled", "true") == "true" else "معطلة 🔕"
 
     keyboard = InlineKeyboardMarkup(
@@ -263,7 +204,7 @@ async def cmd_admin(message: Message):
 async def toggle_force_join(callback_query: CallbackQuery):
     if callback_query.from_user.id != ADMIN_ID:
         return
-    current = get_setting("force_join_enabled", "true")
+    current = get_setting("force_join_enabled", "false")
     new_val = "false" if current == "true" else "true"
     set_setting("force_join_enabled", new_val)
     await callback_query.answer("تم تغيير حالة الاشتراك الإجباري!")
@@ -297,7 +238,7 @@ async def process_new_channel(message: Message, state: FSMContext):
     
     set_setting("channel_id", new_ch)
     await state.clear()
-    await message.answer(f"✅ تم تحديث قناة الاشتراك الإجباري إلى: {new_ch}")
+    await message.answer(f"✅ تم تحديث معرف القناة إلى: {new_ch}")
 
 @dp.callback_query(F.data == "admin_stats")
 async def process_admin_stats(callback_query: CallbackQuery):
