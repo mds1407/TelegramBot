@@ -9,11 +9,10 @@ from aiogram.filters import Command
 from aiogram.exceptions import TelegramBadRequest
 
 TOKEN = os.getenv("BOT_TOKEN")
-REQUIRED_CHANNEL = "https://t.me/MDS2030"
 ADMIN_ID = 806382074
 
-# ضع هنا معرف قناتك الإجبارية (مثلاً @YourChannel یا معرف معرفك العام)
-REQUIRED_CHANNEL = "@ChannelName"  # استبدلها بمعرف قناتك الحقيقي
+# معرف قناتك الإجبارية (استبدل @ChannelName بمعرف قناتك الحقيقي)
+REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@ChannelName")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -57,7 +56,7 @@ async def cmd_start(message: Message):
             reply_markup=get_subscription_keyboard()
         )
         return
-    
+     
     await message.answer("أهلاً بك! أرسل لي رابط فيديو من التيك توك وسأقوم بتحميله لك.")
 
 # --------------------------------------------------
@@ -67,7 +66,7 @@ async def cmd_start(message: Message):
 async def process_check_sub(callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     if await check_user_subscription(user_id):
-        await callback_query.message.edit_text("✨ شكراً اشتراكك! يمكنك الآن إرسال رابط تيك توك للتحميل.")
+        await callback_query.message.edit_text("✨ شكراً لاشتراكك! يمكنك الآن إرسال رابط تيك توك للتحميل.")
     else:
         await callback_query.answer("⚠️ لم تقم بالاشتراك في القناة بعد، يرجى الاشتراك أولاً.", show_alert=True)
 
@@ -86,7 +85,7 @@ async def cmd_admin(message: Message):
 @dp.message()
 async def handle_message(message: Message):
     user_id = message.from_user.id
-    
+     
     # التحقق من الاشتراك الإجباري قبل قبول أي رابط
     if not await check_user_subscription(user_id):
         await message.answer(
@@ -114,7 +113,7 @@ async def handle_message(message: Message):
 @dp.callback_query(F.data.in_(["download_video", "download_audio"]))
 async def process_download(callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
-    
+     
     if not await check_user_subscription(user_id):
         await callback_query.message.edit_text(
             f"عذراً، اشترك في القناة أولاً:\n{REQUIRED_CHANNEL}",
@@ -152,7 +151,7 @@ async def process_download(callback_query: CallbackQuery):
                 await bot.send_video(chat_id=user_id, video=file_to_send, caption="تم التحميل بنجاح! 🎬")
             else:
                 await bot.send_audio(chat_id=user_id, audio=file_to_send, caption="تم استخراج الصوت بنجاح! 🎵")
-            
+             
             os.remove(output_filename)
             await callback_query.message.delete()
         else:
