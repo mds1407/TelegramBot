@@ -11,7 +11,7 @@ from aiogram.exceptions import TelegramBadRequest
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = 806382074
 
-# معرف قناتك الإجبارية (استبدل @ChannelName بمعرف قناتك الحقيقي)
+# معرف قناتك الإجبارية (@https://t.me/MDS2030)
 REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@ChannelName")
 
 bot = Bot(token=TOKEN)
