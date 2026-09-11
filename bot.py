@@ -8,7 +8,8 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, F
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramBadRequest
 
-TOKEN = "8950045775:AAFyx86XV03o_6arGdQPCWlKKVAWR7x8zPk"
+TOKEN = os.getenv("BOT_TOKEN")
+REQUIRED_CHANNEL = "https://t.me/MDS2030"
 ADMIN_ID = 806382074
 
 # ضع هنا معرف قناتك الإجبارية (مثلاً @YourChannel یا معرف معرفك العام)
